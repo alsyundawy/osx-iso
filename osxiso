@@ -81,7 +81,7 @@ Select OS or Quit: "
     hdiutil attach "$app_file/Contents/SharedSupport/InstallESD.dmg" -noverify -nobrowse -mountpoint "$app_mount"
 
     # Create a blank ISO of 7316MB with a Single Partition
-    hdiutil create -o "$temp/$1.cdr" -size 7316m -layout SPUD -fs HFS+J
+    hdiutil create -o "$temp/$1.cdr" -size 8192m -layout SPUD -fs HFS+J
 
     # Mount the blank ISO
     hdiutil attach "$temp/$1.cdr.dmg" -noverify -nobrowse -mountpoint "$build_mount"
@@ -121,9 +121,9 @@ Select OS or Quit: "
 
     prep_build "$1"
 
-    iso_size="8125m"
+    iso_size="8192m"
     if [[ "$apps_large" == *"|$1|"* ]]; then
-      iso_size="13750m"
+      iso_size="16384m"
     fi
     # Create a blank ISO with a Single Partition
     hdiutil create -o "$temp/$1.cdr" -size "$iso_size" -layout SPUD -fs HFS+J
