@@ -1,227 +1,350 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Script Name : osxiso
+# Description : Create a bootable OS X / macOS ISO from official installer apps.
+# Created By  : Buster Collings <https://github.com/busterc>
+# Edited By   : alsyundawy <alsyundawy@users.noreply.github.com>
+# GitHub      : https://github.com/alsyundawy
+# License     : ISC License
+# ==============================================================================
+# CHANGELOG:
+# 2026-07-08 | v6.1.0 | alsyundawy
+#   - Refactored shell function with subshell encapsulation to prevent scope, 
+#     trap, and settings pollution in sourced interactive shells.
+#   - Implemented strict safety mode via 'set -Eeuo pipefail' inside subshell.
+#   - Replaced fixed directory temp paths with secure system 'mktemp -d'.
+#   - Substituted hardcoded disk sizes with dynamic app size computation.
+#   - Integrated sudo for system commands in build_v1 to fix permission bugs.
+#   - Automated scanning of /Applications for unlisted installer apps.
+#   - Resolved interactive select menu recursion to avoid stack overflow risks.
+# ==============================================================================
 
-function osxiso() {
-  PS3="
-Select OS or Quit: "
-  temp="$PWD/temp"
-  dist="$PWD/dist"
-  base_mount="/Volumes/OS X Base System"
-  build_mount="/Volumes/install_build"
-  app_mount="/Volumes/install_app"
-  apps_v1="|macOS Sierra|OS X El Capitan|OS X Yosemite|OS X Mavericks|"
-  apps_v2="|macOS High Sierra|macOS Mojave|macOS Catalina|macOS Big Sur|macOS Monterey|macOS Ventura|macOS Sonoma|macOS Sequoia|macOS Tahoe|"
-  apps_large="|macOS Big Sur|macOS Monterey|macOS Ventura|macOS Sonoma|macOS Sequoia|macOS Tahoe|"
-  apps=(
-    "macOS Tahoe"
-    "macOS Sequoia"
-    "macOS Sonoma"
-    "macOS Ventura"
-    "macOS Monterey"
-    "macOS Big Sur"
-    "macOS Catalina"
-    "macOS Mojave"
-    "macOS High Sierra"
-    "macOS Sierra"
-    "OS X El Capitan"
-    "OS X Yosemite"
-    "OS X Mavericks"
-  )
-  apps_available=()
-  how_to_download_macos="https://support.apple.com/en-us/102662"
-  how_to_download_message="How to download macOS: $how_to_download_macos"
+osxiso() {
+  (
+    # Enable safe mode:
+    # -e: Exit immediately if a command exits with a non-zero status.
+    # -u: Treat unset variables as an error.
+    # -E: Inherit ERR traps.
+    # -o pipefail: Pipeline status is the status of the last command to fail.
+    set -Eeuo pipefail
 
-  function log_warning() {
-    echo "$(tput setab 3)$(tput setaf 0)>> $* $(tput sgr0)"
-  }
-
-  function log_error() {
-    >&2 echo "$(tput setab 1)$(tput setaf 7)>> $* $(tput sgr0)"
-  }
-
-  function log_success() {
-    echo "$(tput setab 2)$(tput setaf 7)$*$(tput sgr0)"
-  }
-
-  function detach_mounts() {
-    # Unmount OS
-    [[ ! -d "/Volumes/Install $1" ]] || hdiutil detach -force "/Volumes/Install $1"
-    # Unmount the installer image
-    [[ ! -d  "$app_mount" ]] || hdiutil detach -force "$app_mount"
-    # Unmount the sparse bundle
-    [[ ! -d  "$base_mount" ]] || hdiutil detach -force "$base_mount"
-    # Unmount temporary build path
-    [[ ! -d "$build_mount" ]] || hdiutil detach -force "$build_mount"
-  }
-
-  function cleanup() {
-    detach_mounts "$1"
-    # Remove temp directory
-    rm -rf "$temp"
-  }
-
-  function abort() {
-    echo
-    log_error "Command returned with error, aborting ..."
-    echo
-    exit 2
-  }
-
-  function prep_build() {
-    # Attempt cleanup of any failed previous attempts
-    cleanup "$1"
-
-    # Prepare to do work
-    mkdir -p "$temp"
-    mkdir -p "$dist"
-  }
-
-  function build_v1() {
-    trap cleanup EXIT
-    trap abort ERR
-
-    local app_file="/Applications/Install $1.app"
-
-    prep_build
-
-    # Mount the installer image
-    hdiutil attach "$app_file/Contents/SharedSupport/InstallESD.dmg" -noverify -nobrowse -mountpoint "$app_mount"
-
-    # Create a blank ISO of 7316MB with a Single Partition
-    hdiutil create -o "$temp/$1.cdr" -size 7316m -layout SPUD -fs HFS+J
-
-    # Mount the blank ISO
-    hdiutil attach "$temp/$1.cdr.dmg" -noverify -nobrowse -mountpoint "$build_mount"
-
-    # Restore the Base System into the blank ISO
-    asr restore -source "$app_mount/BaseSystem.dmg" -target "$build_mount" -noprompt -noverify -erase
-
-    # Remove Package link and replace with actual files
-    rm "$base_mount/System/Installation/Packages"
-    cp -rp "$app_mount/Packages" "$base_mount/System/Installation/"
-
-    # Copy "$1" installer dependencies
-    cp -rp "$app_mount/BaseSystem.chunklist" "$base_mount/BaseSystem.chunklist"
-    cp -rp "$app_mount/BaseSystem.dmg" "$base_mount/BaseSystem.dmg"
-
-    detach_mounts "$1"
-
-    # Convert the sparse bundle to ISO/CD master
-    hdiutil convert "$temp/$1.cdr.dmg" -format UDTO -o "$temp/$1.iso"
-
-    # Rename the ISO and move it to the distribution dir
-    mv "$temp/$1.iso.cdr" "$dist/$1.iso"
-
-    cleanup
-
-    echo
-    echo "ISO is located at:"
-    echo
-    echo "$dist/$1.iso"
-  }
-
-  function build_v2() {
-    trap cleanup EXIT
-    trap abort ERR
-
-    local app_file="/Applications/Install $1.app"
-
-    prep_build "$1"
-
-    iso_size="8125m"
-    if [[ "$apps_large" == *"|$1|"* ]]; then
-      iso_size="20000m"
-    fi
-    # Create a blank ISO with a Single Partition
-    hdiutil create -o "$temp/$1.cdr" -size "$iso_size" -layout SPUD -fs HFS+J
-
-    # Mount the blank ISO
-    hdiutil attach "$temp/$1.cdr.dmg" -noverify -nobrowse -mountpoint "$build_mount"
-
-    # Let createinstallmedia populate the blank ISO
-    printf "$(tput setab 3)$(tput setaf 0)%s$(tput sgr0) " "<sudo>"
-    sudo "$app_file"/Contents/Resources/createinstallmedia --volume "$build_mount" --nointeraction
-
-    detach_mounts "$1"
-
-    # Convert the sparse bundle to ISO/CD master
-    hdiutil convert "$temp/$1.cdr.dmg" -format UDTO -o "$temp/$1.iso"
-
-    # Rename the ISO and move it to the distribution dir
-    mv "$temp/$1.iso.cdr" "$dist/$1.iso"
-
-    cleanup
-
-    echo
-    log_success "========== FINISHED =========="
-    echo
-    echo "ISO is located at:"
-    echo
-    echo "$dist/$1.iso"
-  }
-
-  function choose() {
-    if [[ ${#apps_available[@]} -gt 0 ]]; then
-      echo
-      echo "Available OSes:"
-      echo
-    fi
-
-    COLUMNS=1
-    select app in "${apps_available[@]}"; do
-      case "$app" in
-        "Quit")
-          break
-          ;;
-        *)
-          if [[ "$apps_v2" == *"|$app|"* ]]; then
-            log_success "** Building ISO for $app **"
-            build_v2 "$app"
-          elif [[ "$apps_v1" == *"|$app|"* ]]; then
-            log_success "** Building ISO for $app **"
-            build_v1 "$app"
-          else
-            log_error "You must select a valid option *number* from the list."
-            choose
-          fi
-          break
-          ;;
-      esac
-    done
-  }
-
-  function main() {
-    need_to_download_macos=false
-
-    for app in "${apps[@]}"; do
-      if [[ -d "/Applications/Install $app.app" ]]; then
-        apps_available+=("$app")
-      else
-        log_warning "Missing /Applications/Install $app.app"
-        need_to_download_macos=true
-      fi
-    done
-
-    if [[ ${#apps_available[@]} -eq 0 ]]; then
-      echo
-      log_error "You do not have any OS installer apps available :("
-      echo
-      log_success ">> $how_to_download_message "
-      echo
+    # Check if we are on macOS
+    if [[ "$(uname)" != "Darwin" ]]; then
+      >&2 echo "Error: This script must be run on macOS (Darwin)."
       exit 1
     fi
 
-    if [[ "$need_to_download_macos" == true ]]; then
-      echo
-      log_success ">> $how_to_download_message "
-      echo
+    # Script variables
+    local PS3="
+Select OS or Quit: "
+    local temp=""
+    local dist="$PWD/dist"
+    local base_mount="/Volumes/OS X Base System"
+    local build_mount="/Volumes/install_build"
+    local app_mount="/Volumes/install_app"
+    local CURRENT_OS=""
+
+    local apps=(
+      "macOS Tahoe"
+      "macOS Sequoia"
+      "macOS Sonoma"
+      "macOS Ventura"
+      "macOS Monterey"
+      "macOS Big Sur"
+      "macOS Catalina"
+      "macOS Mojave"
+      "macOS High Sierra"
+      "macOS Sierra"
+      "OS X El Capitan"
+      "OS X Yosemite"
+      "OS X Mavericks"
+    )
+    local apps_available=()
+    local how_to_download_macos="https://support.apple.com/en-us/102662"
+    local how_to_download_message="How to download macOS: $how_to_download_macos"
+
+    # Terminal styling check
+    local COLOR_RESET COLOR_INFO COLOR_WARN COLOR_ERROR COLOR_SUCCESS
+    if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+      COLOR_RESET="$(tput sgr0)"
+      COLOR_INFO="$(tput setaf 6)"
+      COLOR_WARN="$(tput setab 3)$(tput setaf 0)"
+      COLOR_ERROR="$(tput setab 1)$(tput setaf 7)"
+      COLOR_SUCCESS="$(tput setab 2)$(tput setaf 7)"
+    else
+      COLOR_RESET=""
+      COLOR_INFO=""
+      COLOR_WARN=""
+      COLOR_ERROR=""
+      COLOR_SUCCESS=""
     fi
 
-    apps_available+=("Quit")
+    log_info() {
+      echo "${COLOR_INFO}>> $*${COLOR_RESET}"
+    }
 
-    choose
-  }
+    log_warning() {
+      echo "${COLOR_WARN}>> $* ${COLOR_RESET}"
+    }
 
-  main
+    log_error() {
+      echo "${COLOR_ERROR}>> $* ${COLOR_RESET}" >&2
+    }
+
+    log_success() {
+      echo "${COLOR_SUCCESS}$*${COLOR_RESET}"
+    }
+
+    detach_mounts() {
+      local os_name="$1"
+
+      # Unmount OS Installer volume if mounted
+      if [[ -n "$os_name" && -d "/Volumes/Install $os_name" ]]; then
+        hdiutil detach -force "/Volumes/Install $os_name" >/dev/null 2>&1 || true
+      fi
+      # Unmount the installer image
+      if [[ -d "$app_mount" ]]; then
+        hdiutil detach -force "$app_mount" >/dev/null 2>&1 || true
+      fi
+      # Unmount the sparse bundle (Base System)
+      if [[ -d "$base_mount" ]]; then
+        hdiutil detach -force "$base_mount" >/dev/null 2>&1 || true
+      fi
+      # Unmount temporary build path
+      if [[ -d "$build_mount" ]]; then
+        hdiutil detach -force "$build_mount" >/dev/null 2>&1 || true
+      fi
+    }
+
+    # shellcheck disable=SC2329 # Invoked indirectly via EXIT trap
+    cleanup() {
+      # Disable exit-on-error inside cleanup to ensure all steps execute
+      set +e
+      detach_mounts "$CURRENT_OS"
+      if [[ -n "$temp" && -d "$temp" ]]; then
+        rm -rf "$temp"
+      fi
+    }
+
+    # shellcheck disable=SC2329 # Invoked indirectly via ERR trap
+    abort() {
+      echo
+      log_error "Command returned with error, aborting ..."
+      echo
+      exit 2
+    }
+
+    prep_build() {
+      # Attempt cleanup of any failed previous attempts
+      detach_mounts "$CURRENT_OS"
+
+      # Prepare distribution folder
+      mkdir -p "$dist"
+    }
+
+    build_v1() {
+      (
+        CURRENT_OS="$1"
+        trap cleanup EXIT
+        trap abort ERR
+
+        local app_file="/Applications/Install $1.app"
+        temp=$(mktemp -d -t osxiso-tmp.XXXXXX)
+
+        prep_build
+
+        # Mount the installer image
+        log_info "Mounting ESD image..."
+        hdiutil attach "$app_file/Contents/SharedSupport/InstallESD.dmg" -noverify -nobrowse -mountpoint "$app_mount"
+
+        # Create a blank ISO of 7316MB with a Single Partition
+        log_info "Creating blank installer disk image..."
+        hdiutil create -o "$temp/$1.cdr" -size 7316m -layout SPUD -fs HFS+J
+
+        # Mount the blank ISO
+        log_info "Mounting blank disk image..."
+        hdiutil attach "$temp/$1.cdr.dmg" -noverify -nobrowse -mountpoint "$build_mount"
+
+        # Restore the Base System into the blank ISO
+        log_info "Restoring Base System (may require sudo)..."
+        sudo asr restore -source "$app_mount/BaseSystem.dmg" -target "$build_mount" -noprompt -noverify -erase
+
+        # Remove Package link and replace with actual files
+        log_info "Replacing package symlink with actual files..."
+        sudo rm "$base_mount/System/Installation/Packages"
+        sudo cp -rp "$app_mount/Packages" "$base_mount/System/Installation/"
+
+        # Copy "$1" installer dependencies
+        log_info "Copying system chunklist and dependencies..."
+        sudo cp -rp "$app_mount/BaseSystem.chunklist" "$base_mount/BaseSystem.chunklist"
+        sudo cp -rp "$app_mount/BaseSystem.dmg" "$base_mount/BaseSystem.dmg"
+
+        detach_mounts "$1"
+
+        # Convert the sparse bundle to ISO/CD master
+        log_info "Converting image to ISO/CD master format..."
+        hdiutil convert "$temp/$1.cdr.dmg" -format UDTO -o "$temp/$1.iso"
+
+        # Rename the ISO and move it to the distribution dir
+        mv "$temp/$1.iso.cdr" "$dist/$1.iso"
+
+        echo
+        log_success "========== FINISHED =========="
+        echo
+        echo "ISO is located at:"
+        echo
+        echo "$dist/$1.iso"
+      )
+    }
+
+    build_v2() {
+      (
+        CURRENT_OS="$1"
+        trap cleanup EXIT
+        trap abort ERR
+
+        local app_file="/Applications/Install $1.app"
+        temp=$(mktemp -d -t osxiso-tmp.XXXXXX)
+
+        prep_build
+
+        # Calculate required size dynamically
+        log_info "Calculating required disk space for installer..."
+        local app_size_kb
+        if [[ -d "$app_file" ]]; then
+          app_size_kb=$(du -sk "$app_file" | cut -f1)
+        else
+          log_error "Installer app not found at $app_file"
+          exit 1
+        fi
+        # Convert to MB and add 2GB safety buffer
+        local iso_size_mb=$(( (app_size_kb / 1024) + 2048 ))
+        local iso_size="${iso_size_mb}m"
+        log_info "Creating blank installer disk image of size $iso_size..."
+
+        # Create a blank ISO with a Single Partition
+        hdiutil create -o "$temp/$1.cdr" -size "$iso_size" -layout SPUD -fs HFS+J
+
+        # Mount the blank ISO
+        log_info "Mounting blank disk image..."
+        hdiutil attach "$temp/$1.cdr.dmg" -noverify -nobrowse -mountpoint "$build_mount"
+
+        # Let createinstallmedia populate the blank ISO
+        log_info "Running createinstallmedia (may require sudo)..."
+        sudo "$app_file/Contents/Resources/createinstallmedia" --volume "$build_mount" --nointeraction
+
+        detach_mounts "$1"
+
+        # Convert the sparse bundle to ISO/CD master
+        log_info "Converting image to ISO/CD master format..."
+        hdiutil convert "$temp/$1.cdr.dmg" -format UDTO -o "$temp/$1.iso"
+
+        # Rename the ISO and move it to the distribution dir
+        mv "$temp/$1.iso.cdr" "$dist/$1.iso"
+
+        echo
+        log_success "========== FINISHED =========="
+        echo
+        echo "ISO is located at:"
+        echo
+        echo "$dist/$1.iso"
+      )
+    }
+
+    choose() {
+      if [[ ${#apps_available[@]} -gt 0 ]]; then
+        echo
+        echo "Available OSes:"
+        echo
+      fi
+
+      local COLUMNS=1
+      local app
+      select app in "${apps_available[@]}"; do
+        if [[ -z "$app" ]]; then
+          log_error "Invalid selection. Please enter a valid number from the list."
+          echo
+          continue
+        fi
+
+        if [[ "$app" == "Quit" ]]; then
+          break
+        fi
+
+        case "$app" in
+          "macOS Sierra" | "OS X El Capitan" | "OS X Yosemite" | "OS X Mavericks")
+            log_success "** Building ISO for $app **"
+            build_v1 "$app"
+            ;;
+          *)
+            log_success "** Building ISO for $app **"
+            build_v2 "$app"
+            ;;
+        esac
+        break
+      done
+    }
+
+    main() {
+      local need_to_download_macos=false
+      local app
+
+      # Check predefined apps in /Applications
+      for app in "${apps[@]}"; do
+        if [[ -d "/Applications/Install $app.app" ]]; then
+          apps_available+=("$app")
+        else
+          log_warning "Missing /Applications/Install $app.app"
+          need_to_download_macos=true
+        fi
+      done
+
+      # Scan `/Applications` for any other installers not in the predefined list
+      local app_path
+      for app_path in /Applications/Install*.app; do
+        if [[ -d "$app_path" ]]; then
+          local app_name
+          app_name=$(basename "$app_path" .app)
+          app_name="${app_name#Install }"
+
+          # Check if already in the list to prevent duplicates
+          local found=false
+          local existing
+          for existing in "${apps_available[@]}"; do
+            if [[ "$existing" == "$app_name" ]]; then
+              found=true
+              break
+            fi
+          done
+
+          if [[ "$found" == false ]]; then
+            apps_available+=("$app_name")
+          fi
+        fi
+      done
+
+      if [[ ${#apps_available[@]} -eq 0 ]]; then
+        echo
+        log_error "You do not have any OS installer apps available :("
+        echo
+        log_success ">> $how_to_download_message"
+        echo
+        exit 1
+      fi
+
+      if [[ "$need_to_download_macos" == true ]]; then
+        echo
+        log_success ">> $how_to_download_message"
+        echo
+      fi
+
+      apps_available+=("Quit")
+
+      choose
+    }
+
+    main
+  )
 }
 
 ## Export or run
